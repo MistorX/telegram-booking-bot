@@ -1,4 +1,4 @@
-﻿from aiogram import types
+from aiogram import types
 from dotenv import load_dotenv
 import aiogram
 import asyncio
@@ -18,31 +18,32 @@ import logging
 load_dotenv()
 bot = aiogram.Bot(token=os.getenv('TOKEN'))
 dp = aiogram.Dispatcher()
-id_admin = os.getenv('ADMIN_ID')
 WEEKDAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
-DB = 'ww.db'
+DB = 'boking.db'
 
 async def init_db():
-    """Создаёт таблицы, если их ещё нет. Вызывается один раз при старте бота."""
     async with aiosqlite.connect(DB) as db:
-        # сюда падают подтверждённые записи пользователей
+        # Таблица записей (добавили user_id)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS zapis(
+                user_id INTEGER,
                 name TEXT,
                 email TEXT,
-                date TEXT,   -- формат 'YYYY-MM-DD'
-                time TEXT,    -- формат 'HH:MM'
+                date TEXT,   
+                time TEXT,    
                 chat_id TEXT,
                 reminded INTEGER DEFAULT 0
             )
         """)
-        # сюда падает расписание админа: одна строка = один рабочий день недели
+        # Таблица расписания (добавили user_id)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS schedule(
-                weekday INTEGER PRIMARY KEY,  -- 0=Пн ... 6=Вс
-                start_time TEXT,              -- 'HH:MM', с какого часа принимаем
-                end_time TEXT,                -- 'HH:MM', до какого часа принимаем
-                interval_min INTEGER          -- шаг между слотами в минутах
+                user_id INTEGER,              
+                weekday INTEGER,              
+                start_time TEXT,              
+                end_time TEXT,                
+                interval_min INTEGER,
+                PRIMARY KEY (user_id, weekday)
             )
         """)
         await db.commit()
@@ -70,22 +71,31 @@ async def get_all_records():
 
 #клавиатуры 
 
+# Главная клавиатура (Меню)
+def get_main_menu():
+    return types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text='Запись')],
+            [types.KeyboardButton(text='Админ-панель')]
+        ],
+        resize_keyboard=True
+    )
+
 def get_murkup():
     return types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text='новая запись')]],
+        keyboard=[[types.KeyboardButton(text='В меню')]],
         resize_keyboard=True
     )
 
 def get_murkup_schedule():
     return types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text='список записей')]],
+        keyboard=[[types.KeyboardButton(text='список записей')], [types.KeyboardButton(text='В меню')]],
         resize_keyboard=True
     )
-
 #клавиатура с рабочими днями для пользователя 
-async def available_days_keyboard():
+async def available_days_keyboard(user_id):
     async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT weekday FROM schedule") as cur:
+        async with db.execute("SELECT weekday FROM schedule WHERE user_id = ?", (user_id,)) as cur:
             rows = await cur.fetchall()
     working_weekdays = {r[0] for r in rows}
     if not working_weekdays:
@@ -106,12 +116,12 @@ async def available_days_keyboard():
     return builder.as_markup()
 
 #клавиатура со свободным временем для пользователя 
-async def available_times_keyboard(date_str: str):
+async def available_times_keyboard(user_id, date_str: str):
     d = datetime.strptime(date_str, '%Y-%m-%d').date()
     async with aiosqlite.connect(DB) as db:
         async with db.execute(
-            "SELECT start_time, end_time, interval_min FROM schedule WHERE weekday = ?",
-            (d.weekday(),)
+            "SELECT start_time, end_time, interval_min FROM schedule WHERE user_id = ? AND weekday = ?",
+            (user_id, d.weekday())
         ) as cur:
             row = await cur.fetchone()
         if not row:
@@ -119,7 +129,7 @@ async def available_times_keyboard(date_str: str):
         start_time, end_time, interval_min = row
 
         async with db.execute(
-            "SELECT time FROM zapis WHERE date = ?", (date_str,)
+            "SELECT time FROM zapis WHERE user_id = ? AND date = ?", (user_id, date_str)
         ) as cur:
             taken = {r[0] for r in await cur.fetchall()}
 
@@ -165,33 +175,73 @@ def parse_hhmm(text: str):
     
 #обработчик команды /start  
 @dp.message(Command('start'))
-@dp.message(F.text == 'новая запись')
-@dp.message(F.text == 'список записей')
-async def hello(message: types.Message, state: FSMContext):
-    if str(message.from_user.id) == id_admin:
-        rows = await get_all_records()
-        if not rows:
-            await message.answer('записей пока нет', reply_markup=get_murkup_schedule())
-            return
-        await message.answer('вот список записей:', reply_markup=get_murkup_schedule())
-        for name, email, date, time_ in rows:
-            await message.answer(
-                f"Имя: {name}\nEmail: {email}\nДата: {date}\nВремя: {time_}"
-            )
-        return
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear() 
+    await message.answer(
+        "👋 Добро пожаловать в демо-бот для онлайн-записи!\n\n"
+        "Бот умеет работать в двух режимах: вы можете настроить свой график и тут же проверить, как записываются ваши клиенты.\n\n"
+        "👇 <b>Как протестировать бота в 2 шага:</b>\n\n"
+        "1️⃣ Нажмите <b>«Админ-панель»</b> -> введите /schedule, чтобы выбрать рабочие дни, часы и интервал между клиентами.\n\n"
+        "2️⃣ Нажмите <b>«Запись»</b>, чтобы увидеть сценарий от лица обычного клиента.\n\n"
+        "После записи вернитесь в «Админ-панель» -> «список записей», чтобы увидеть вашу бронь!",
+        reply_markup=get_main_menu(),
+        parse_mode="HTML"  
+    )
 
-    kb = await available_days_keyboard()
+# КЛИЕНТ нажал Запись
+@dp.message(F.text == 'Запись')
+async def start_booking(message: types.Message, state: FSMContext):
+    await state.clear()
+    user_id = message.from_user.id
+    # Передаем ID в клавиатуру
+    kb = await available_days_keyboard(user_id) 
     if kb is None:
-        await message.answer('свободных дней пока нет, попробуйте позже')
+        await message.answer('У вас пока нет расписания. Нажмите "Админ-панель" и настройте график.', reply_markup=get_main_menu())
         return
     await message.answer('выберите день записи:', reply_markup=kb)
     await state.set_state(Form.choosing_day)
+
+@dp.message(F.text == 'Админ-панель')
+async def admin_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Вы в меню настройки.\n\n"
+        "Введите /schedule, чтобы настроить рабочие дни.\n"
+        "Нажмите 'список записей', чтобы посмотреть брони.",
+        reply_markup=get_murkup_schedule()
+    )
+
+# КНОПКА В МЕНЮ чтобы можно было выйти из любого состояния
+@dp.message(F.text == 'В меню')
+async def back_to_menu(message: types.Message, state: FSMContext):
+    await cmd_start(message, state)
+
+@dp.message(F.text == 'список записей')
+async def admin_list_records(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id 
+    
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute(
+            "SELECT name, email, date, time FROM zapis WHERE user_id = ? ORDER BY date, time", 
+            (user_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        await message.answer('У вас пока нет записей.', reply_markup=get_murkup_schedule())
+        return
+        
+    await message.answer('Вот список ваших записей:', reply_markup=get_murkup_schedule())
+    for name, email, date, time_ in rows:
+        await message.answer(f"👤 {name}\n📧 {email}\n📅 {date}\n⏰ {time_}")
 
 #далее идут обработчики состояний
 @dp.callback_query(Form.choosing_day, F.data.startswith('day:'))
 async def choose_day(callback: types.CallbackQuery, state: FSMContext):
     date_str = callback.data.split(':', 1)[1]
-    kb = await available_times_keyboard(date_str)
+    user_id = callback.from_user.id
+    # Передаем юзера
+    kb = await available_times_keyboard(user_id, date_str) 
     if kb is None:
         await callback.answer('на этот день нет свободного времени', show_alert=True)
         return
@@ -200,19 +250,20 @@ async def choose_day(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(Form.choosing_time)
     await callback.answer()
 
-
 @dp.callback_query(Form.choosing_time, F.data.startswith('time:'))
 async def choose_time(callback: types.CallbackQuery, state: FSMContext):
     _, date_str, time_str = callback.data.split(':', 2)
+    user_id = callback.from_user.id
 
-    # слот могли занять, пока пользователь выбирал — перепроверяем перед тем как спросить имя
+    # Проверяем занятость только у этого юзера
     async with aiosqlite.connect(DB) as db:
         async with db.execute(
-            "SELECT 1 FROM zapis WHERE date = ? AND time = ?", (date_str, time_str)
+            "SELECT 1 FROM zapis WHERE user_id = ? AND date = ? AND time = ?", 
+            (user_id, date_str, time_str)
         ) as cur:
             if await cur.fetchone():
                 await callback.answer('это время уже заняли, выберите другое', show_alert=True)
-                kb = await available_times_keyboard(date_str)
+                kb = await available_times_keyboard(user_id, date_str)
                 if kb:
                     await callback.message.edit_reply_markup(reply_markup=kb)
                 return
@@ -237,43 +288,37 @@ async def form_email(message: types.Message, state: FSMContext):
         return
     await state.update_data(email=message.text)
     data = await state.get_data()
+    user_id = message.from_user.id 
 
     async with aiosqlite.connect(DB) as db:
-        # финальная проверка 
         async with db.execute(
-            "SELECT 1 FROM zapis WHERE date = ? AND time = ?", (data['date'], data['time'])
+            "SELECT 1 FROM zapis WHERE user_id = ? AND date = ? AND time = ?", 
+            (user_id, data['date'], data['time'])
         ) as cur:
             if await cur.fetchone():
                 await message.answer('это время уже заняли, начните запись заново: /start')
                 await state.clear()
                 return
         chat_id = message.chat.id
-        # добавляет запись в таблицу
+        # Записываем с user_id
         await db.execute(
-            "INSERT INTO zapis (name, email, date, time, chat_id) VALUES (?, ?, ?, ?, ?)",
-            (data['name'], data['email'], data['date'], data['time'], chat_id)
+            "INSERT INTO zapis (user_id, name, email, date, time, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, data['name'], data['email'], data['date'], data['time'], chat_id)
         )
         await db.commit()
 
     await message.answer(
         f" {data['name']} Спасибо за запись!\nДата: {data['date']} \nВремя: {data['time']}",
-        reply_markup=get_murkup()
+        reply_markup=get_main_menu()
     )
-
-    # Отправка уведомления админу
-    await bot.send_message(
-        chat_id=id_admin,
-        text=f"Новая запись:\nИмя: {data['name']}\nEmail: {data['email']}\nДата: {data['date']}\nВремя: {data['time']}"
-    )
-
-
+    
+    
     await state.clear()
 
 #настройка расписания админом /schedule
 @dp.message(Command('schedule'))
 async def schedule_start(message: types.Message, state: FSMContext):
-    if str(message.from_user.id) != id_admin:
-        return
+    
     await state.update_data(days=[])
     await message.answer('выберите рабочие дни:', reply_markup=weekdays_keyboard(set()))
     await state.set_state(ScheduleForm.choosing_days)
@@ -335,23 +380,29 @@ async def schedule_interval(message: types.Message, state: FSMContext):
         return
     interval = int(message.text)
     data = await state.get_data()
+    user_id = message.from_user.id  
 
     async with aiosqlite.connect(DB) as db:
-        placeholders = ','.join('?' * len(data['days']))
-        await db.execute(f"DELETE FROM schedule WHERE weekday IN ({placeholders})", data['days'])
+
+        await db.execute(
+            "DELETE FROM schedule WHERE user_id = ?", 
+            (user_id,)
+        )
+        
+        # 2. Записываем новый график, привязывая его к user_id
         await db.executemany(
-            "INSERT INTO schedule (weekday, start_time, end_time, interval_min) VALUES (?, ?, ?, ?)",
-            [(d, data['start_time'], data['end_time'], interval) for d in data['days']]
+            "INSERT INTO schedule (user_id, weekday, start_time, end_time, interval_min) VALUES (?, ?, ?, ?, ?)",
+            [(user_id, d, data['start_time'], data['end_time'], interval) for d in data['days']]
         )
         await db.commit()
 
     days_str = ', '.join(WEEKDAY_NAMES[d] for d in sorted(data['days']))
     await message.answer(
-        f"расписание сохранено:\nдни: {days_str}\nс {data['start_time']} до {data['end_time']}\n"
-        f"интервал: {interval} мин"
+        f"✅ Расписание сохранено:\nДни: {days_str}\nС {data['start_time']} до {data['end_time']}\n"
+        f"Интервал: {interval} мин",
+        reply_markup=get_main_menu()  
     )
     await state.clear()
-
 
 async def main():
     await init_db()
